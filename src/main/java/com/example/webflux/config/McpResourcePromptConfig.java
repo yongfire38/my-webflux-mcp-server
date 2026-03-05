@@ -1,0 +1,179 @@
+package com.example.webflux.config;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import com.example.webflux.model.DocumentMetadata;
+import com.example.webflux.repository.DocumentMetadataRepository;
+
+import io.modelcontextprotocol.server.McpAsyncServerExchange;
+import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+import lombok.RequiredArgsConstructor;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+
+/**
+ * MCP Resource / Prompt 등록 설정
+ *
+ * Resource: 인덱싱된 문서 목록 (resource://documents/index)
+ *   → LLM이 리소스를 읽어 어떤 파일이 검색 가능한지 파악
+ *   → searchDocuments 호출 전 사전 확인 용도
+ *
+ * Prompt: RAG 시스템 프롬프트 (rag_assistant)
+ *   → 클라이언트가 이 프롬프트를 system 메시지로 사용하면
+ *     LLM이 반드시 searchDocuments를 호출하도록 유도
+ *   → strict 파라미터로 엄격도 조정 가능
+ */
+@Configuration
+@RequiredArgsConstructor
+public class McpResourcePromptConfig {
+
+    private final DocumentMetadataRepository documentMetadataRepository;
+
+    /**
+     * [Resource 예시] 인덱싱된 문서 목록
+     *
+     * MCP Resource는 LLM이 읽기 전용으로 접근하는 데이터 소스입니다.
+     * 도구(Tool)와의 차이: 도구는 실행/검색, 리소스는 정적 데이터 노출
+     *
+     * 사용 예: 클라이언트에서 "어떤 문서가 인덱싱되어 있나요?" 질문 시
+     *          LLM이 resource://documents/index 를 읽어 파일 목록 반환
+     */
+    @Bean
+    public List<McpServerFeatures.AsyncResourceSpecification> mcpResources() {
+
+        var resource = McpSchema.Resource.builder()
+                .uri("resource://documents/index")  // URI (클라이언트가 이 주소로 읽기 요청)
+                .name("인덱싱된 문서 목록")
+                .description("RAG 지식 베이스에 등록된 검색 가능한 문서 목록. "
+                        + "searchDocuments 호출 전 어떤 파일이 있는지 확인할 수 있습니다.")
+                .mimeType("text/plain")
+                .build();
+
+        var specification = new McpServerFeatures.AsyncResourceSpecification(
+                resource,
+                (McpAsyncServerExchange exchange, McpSchema.ReadResourceRequest request) ->
+                        // JPA 블로킹 호출 → boundedElastic으로 격리
+                        Mono.fromCallable(() -> buildDocumentIndex())
+                                .subscribeOn(Schedulers.boundedElastic())
+                                .map(content -> new McpSchema.ReadResourceResult(
+                                        List.of(new McpSchema.TextResourceContents(
+                                                "resource://documents/index",
+                                                "text/plain",
+                                                content
+                                        ))
+                                ))
+        );
+
+        return List.of(specification);
+    }
+
+    /**
+     * [Prompt 예시] RAG 어시스턴트 시스템 프롬프트
+     *
+     * MCP Prompt는 재사용 가능한 프롬프트 템플릿입니다.
+     * 도구(Tool)와의 차이: 도구는 기능 실행, 프롬프트는 LLM 행동 지침 제공
+     *
+     * 사용 예: 클라이언트가 이 프롬프트를 system 메시지로 주입하면
+     *          LLM이 기술 질문에 반드시 searchDocuments를 먼저 호출
+     *
+     * 파라미터:
+     *   strict=false (기본): 기술 질문에만 검색 강제
+     *   strict=true         : 모든 질문에 검색 강제, 검색 결과 없으면 답변 거부
+     */
+    @Bean
+    public List<McpServerFeatures.AsyncPromptSpecification> mcpPrompts() {
+
+        var prompt = new McpSchema.Prompt(
+                "rag_assistant",
+                "RAG 기반 문서 검색을 위한 시스템 프롬프트. "
+                        + "클라이언트가 system 메시지로 사용하여 LLM의 RAG 검색을 유도합니다.",
+                List.of(
+                        new McpSchema.PromptArgument(
+                                "strict",
+                                "엄격 모드 여부 (true/false). "
+                                        + "true이면 모든 질문에 검색 강제, 검색 결과 없으면 답변 거부.",
+                                false
+                        )
+                )
+        );
+
+        var specification = new McpServerFeatures.AsyncPromptSpecification(
+                prompt,
+                (McpAsyncServerExchange exchange, McpSchema.GetPromptRequest request) -> {
+                    boolean strict = Optional.ofNullable(request.arguments())
+                            .map(args -> "true".equals(args.get("strict")))
+                            .orElse(false);
+
+                    String systemText = strict ? STRICT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT;
+
+                    return Mono.just(new McpSchema.GetPromptResult(
+                            "RAG 문서 검색 시스템 프롬프트 (" + (strict ? "엄격" : "기본") + " 모드)",
+                            List.of(new McpSchema.PromptMessage(
+                                    McpSchema.Role.ASSISTANT,
+                                    new McpSchema.TextContent(systemText)
+                            ))
+                    ));
+                }
+        );
+
+        return List.of(specification);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // private helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private String buildDocumentIndex() {
+        long totalChunks = documentMetadataRepository.count();
+
+        if (totalChunks == 0) {
+            return "인덱싱된 문서가 없습니다. 문서를 먼저 업로드하고 인덱싱하세요.";
+        }
+
+        List<DocumentMetadata> all = documentMetadataRepository.findAll();
+        Map<String, Long> fileChunks = all.stream()
+                .collect(Collectors.groupingBy(DocumentMetadata::getFilename, Collectors.counting()));
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== RAG 지식 베이스 문서 목록 ===\n");
+        sb.append(String.format("총 파일 수: %d개 | 총 청크 수: %d개\n\n", fileChunks.size(), totalChunks));
+        sb.append("파일 목록:\n");
+        fileChunks.forEach((filename, count) ->
+                sb.append(String.format("  - %s (%d 청크)\n", filename, count)));
+        sb.append("\n이 파일들의 내용을 searchDocuments 도구로 검색할 수 있습니다.");
+
+        return sb.toString();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 시스템 프롬프트 템플릿
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static final String DEFAULT_SYSTEM_PROMPT = """
+            당신은 문서 기반 AI 어시스턴트입니다.
+
+            [필수 규칙]
+            1. 기술 질문(설정 방법, 사용법, 오류 해결, 코드 예제, API 설명)에는
+               반드시 searchDocuments 도구를 먼저 호출하고 그 결과를 근거로 답변하세요.
+            2. 학습된 지식만으로 답변하지 마세요. 문서 검색 후 답변하세요.
+            3. 검색 결과가 없으면 "문서에서 찾을 수 없습니다"라고 안내하세요.
+            4. describeKnowledgeBase 도구로 어떤 문서가 있는지 먼저 확인할 수 있습니다.
+            """;
+
+    private static final String STRICT_SYSTEM_PROMPT = """
+            당신은 문서 기반 AI 어시스턴트입니다.
+
+            [엄격 모드 - 필수 규칙]
+            1. 모든 질문에 대해 searchDocuments 도구를 반드시 호출하세요. 예외 없음.
+            2. 검색 결과가 있는 경우에만 답변하세요.
+            3. 검색 결과가 없으면 "해당 내용은 문서에 없습니다"라고만 답변하세요.
+            4. 학습된 지식으로 답변을 보완하거나 추측하지 마세요.
+            """;
+}

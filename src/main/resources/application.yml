@@ -1,0 +1,95 @@
+spring:
+  application:
+    name: mcp-server
+
+  # Bean 오버라이딩 허용
+  main:
+    allow-bean-definition-overriding: true
+    # 배너가 서버 연동시 오류를 일으킬 수 있으므로 반드시 off
+    banner-mode: off
+
+  # PostgreSQL
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ragdb
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  # JPA
+  jpa:
+    hibernate:
+      ddl-auto: update
+
+  # Spring AI
+  ai:
+    # MCP Server (WebFlux - Reactive)
+    mcp:
+      server:
+        type: ASYNC
+        protocol: STREAMABLE
+
+    # ONNX Embedding Model
+    model:
+      embedding: transformers
+
+    embedding:
+      transformer:
+        onnx:
+          modelUri: classpath:model/model.onnx
+          modelOutputName: token_embeddings
+        tokenizer:
+          uri: classpath:model/tokenizer.json
+          options:
+            padding: true
+            truncation: true
+            maxLength: 512
+            returnTensor: true
+
+    # PGVector
+    vectorstore:
+      pgvector:
+        initialize-schema: true
+        remove-existing-vector-store-table: false
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 768
+
+# Server Port
+server:
+  port: 9090
+
+# Logging
+logging:
+  level:
+    root: INFO
+    com.example.webflux: DEBUG
+    org.springframework.ai: INFO
+
+# Document (custom namespace)
+app:
+  document:
+    path: file:C:/workspace-test/upload/data/**/*.md
+    pdf-path: file:C:/workspace-test/upload/data/**/*.pdf
+    upload-dir: C:/workspace-test/upload/data
+    pdf:
+      page-top-margin: 0
+      pages-per-document: 1
+    chunk-size: 4000
+    min-chunk-size-chars: 350
+    max-num-chunks: 500
+    min-chunk-length-to-embed: 50
+    normalization:
+      enabled: true
+      remove-html-tags: true
+      normalize-whitespace: true
+      normalize-newlines: true
+      remove-code-blocks: false
+      clean-special-chars: true
+  rag:
+    similarity-threshold: 0.30
+    top-k: 5
+    max-content-length: 2000
+
+# Springdoc (Swagger)
+springdoc:
+  paths-to-exclude: /mcp/**
