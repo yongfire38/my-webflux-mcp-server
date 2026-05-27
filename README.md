@@ -1,194 +1,227 @@
-# WebFlux MCP Server Sample
+# my-webflux-mcp-server
 
-Spring AI MCP Server with WebFlux (Reactive) transport (SSE) 샘플 프로젝트입니다.
+Spring AI MCP(Model Context Protocol) 기반의 RAG(Retrieval-Augmented Generation) 서버입니다.
+PDF/마크다운 문서를 벡터 DB에 인덱싱하고, MCP 클라이언트(LLM 에이전트)의 요청에 따라 관련 문서를 검색해 제공합니다.
 
-## 특징
+---
 
-- **Transport**: HTTP/SSE (Server-Sent Events)
-- **Processing Model**: Reactive, Non-blocking I/O (Spring WebFlux)
-- **Performance**: 적은 스레드로 많은 동시 연결 처리 (고성능)
-- **Deployment**: 독립적인 웹 서비스로 실행
-- **Multi-client**: 수천 명의 클라이언트가 동시 접속 가능
-- **Remote Access**: 네트워크를 통한 원격 접속 지원
-- **Production Ready**: Spring AI 공식 권장 방식
+## 프로젝트 개요
 
-## 환경 설정
+이 서버는 두 가지 역할을 동시에 수행합니다.
 
-### 표준프레임워크 실행환경 5.0 (Boot 적용)
+1. **RAG 지식 베이스 서버**: 문서를 ONNX 임베딩 모델로 벡터화해 PostgreSQL(PGVector)에 저장하고, 의미적 유사도 기반으로 검색합니다.
+2. **MCP 서버**: Spring AI MCP 프로토콜을 통해 AI 클라이언트가 도구(Tool), 리소스(Resource), 프롬프트(Prompt)를 호출할 수 있도록 노출합니다.
 
-| 항목 | 버전 |
-| :--- | :--- |
-| JDK | 17 |
-| Jakarta EE | 10 |
-| Servlet | 6.0 |
-| Spring Framework | 6.2.11 |
-| Spring Boot | 3.5.6 |
+MCP 클라이언트(my-webflux-mcp-client)는 이 서버에 연결해 "문서 검색", "문서 업로드", "현재 시각 조회" 등의 도구를 자유롭게 호출합니다.
+서버 로컬 디렉토리에 있는 PDF/마크다운 파일은 애플리케이션 시작 시 자동으로 인덱싱됩니다.
+
+---
+
+## 환경
+
+| 항목 | 값 |
+|------|-----|
+| Java | 17 |
+| Spring Boot | 3.2.x |
 | Spring AI | 1.1.2 |
+| 서버 포트 | 9090 |
+| MCP 타입 | ASYNC / STREAMABLE |
+| 벡터 DB | PostgreSQL + PGVector (localhost:5432, DB: ragdb) |
+| 임베딩 모델 | ONNX (ko-sroberta 계열, 768차원, classpath 내장) |
+| Ollama | http://localhost:11434 (문서 요약 Sampling 용도) |
+| Swagger UI | http://localhost:9090/swagger-ui.html |
 
-### 개발 및 빌드 도구
+---
 
-| 항목 | 버전 |
-| :--- | :--- |
-| Maven | 3.9.9 |
-| Docker | 28.0.4 |
+## 주요 기능
 
-### 외부 서비스
+### MCP 도구 (Tool)
 
-| 항목 | 버전 | 비고 |
-| :--- | :--- | :--- |
-| Ollama | 0.16.0 | LLM 모델 서빙 |
-| PostgreSQL (PGVector) | 16 | Docker 이미지: `pgvector/pgvector:pg16` |
+MCP 클라이언트가 LLM을 통해 자동으로 호출할 수 있는 기능들입니다.
+`@McpTool` 어노테이션으로 등록되며, 모두 비동기(`Mono<String>`)로 동작합니다.
+별도의 설정 빈(Bean) 없이 `@Service`/`@Component` + `@McpTool` 조합만으로 자동 등록됩니다.
 
-## 제공하는 Tools
+| 도구 이름 | 구현 클래스 | 설명 |
+|-----------|------------|------|
+| `searchDocuments(query)` | DocumentSearchServiceImpl | 질문과 의미적으로 유사한 문서 청크를 벡터 DB에서 검색합니다. RAG의 핵심 기능입니다. |
+| `describeKnowledgeBase()` | DocumentSearchServiceImpl | 현재 벡터 DB에 인덱싱된 문서 목록과 현황을 조회합니다. |
+| `getCurrentDateTimeWithZone(zoneId)` | DateTimeServiceImpl | 지정한 타임존의 현재 날짜/시각을 반환합니다. |
+| `uploadAndIndexDocument(ctx, jobId, filename, base64Content, mimeType)` | DocumentClientUploadServiceImpl | 클라이언트로부터 base64로 인코딩된 파일을 수신해 서버 벡터 DB에 임베딩합니다. Sampling으로 Ollama 문서 요약도 생성합니다. |
 
-### 1. getTouristWeatherIndex
-- **설명**: 도시 코드로 현재 날짜의 관광지 TCI(기후 쾌적도) 지수를 조회합니다
-- **파라미터**:
-  - `cityAreaId`: 도시 코드 (예: 1168000000은 서울 강남구)
-- **구현**: `WeatherService.java`
+#### uploadAndIndexDocument 상세 동작
 
-### 2. getTouristWeatherByDate
-- **설명**: 도시 코드와 특정 날짜로 관광지 TCI 지수를 조회합니다
-- **파라미터**:
-  - `cityAreaId`: 도시 코드
-  - `date`: 조회할 날짜 (형식: yyyyMMdd, 예: 20251103)
-- **구현**: `WeatherService.java`
+이 도구는 일반 도구와 달리 두 가지 특수 MCP 기능을 활용합니다.
 
-### 3. getCityInfo
-- **설명**: 주요 도시 코드 정보를 반환합니다
-- **파라미터**: 없음
-- **구현**: `WeatherService.java`
+- **Progress 알림**: 파일 수신 → 텍스트 추출 → 청킹 → 임베딩의 4단계 진행률을 클라이언트에 실시간으로 전송합니다.
+- **Sampling**: 텍스트 추출 후 클라이언트 측 Ollama에 문서 요약 생성을 위임합니다. 서버가 LLM을 직접 호출하는 것이 아니라, MCP Sampling 메커니즘으로 클라이언트의 Ollama를 역방향 호출합니다.
 
-### 4. getCurrentDateTimeWithZone
-- **설명**: 특정 타임존의 현재 날짜와 시간을 조회합니다
-- **파라미터**:
-  - `zoneId`: Zone ID (예: Asia/Seoul, America/New_York, Europe/London)
-- **구현**: `DateTimeService.java`
+### MCP 리소스 (Resource)
+
+`@McpResource` 어노테이션으로 등록된 읽기 전용 데이터 자원입니다.
+
+| URI | 설명 |
+|-----|------|
+| `resource://documents/index` | 현재 인덱싱된 문서 목록을 반환합니다. |
+
+### MCP 프롬프트 (Prompt)
+
+`@McpPrompt` 어노테이션으로 등록된 재사용 가능한 시스템 프롬프트 템플릿입니다.
+
+| 이름 | 설명 |
+|------|------|
+| `rag_assistant` | RAG 기반 답변을 위한 시스템 프롬프트. `strict` 파라미터(true/false)로 엄격도 조정 가능합니다. |
+
+### REST API (DocumentController)
+
+Swagger UI 또는 직접 HTTP 요청으로 호출하는 문서 관리 API입니다.
+
+| 메서드 | 경로 | 응답 코드 | 설명 |
+|--------|------|-----------|------|
+| `GET` | `/api/documents/status` | 200 | 현재 인덱싱 상태를 조회합니다. |
+| `POST` | `/api/documents/reindex` | 202 / 409 | 서버 로컬 문서를 재인덱싱합니다. 이미 진행 중이면 409 반환. |
+| `POST` | `/api/documents/upload` | 200 | 파일을 multipart/form-data (`files` 필드, 다중 파일 지원)로 직접 업로드해 임베딩합니다. |
+
+---
 
 ## 프로젝트 구조
 
 ```
 my-webflux-mcp-server/
-├── pom.xml                                    # Maven 설정 (webflux, spring-ai-mcp-server-webflux)
-├── README.md
 └── src/main/
     ├── java/com/example/webflux/
-    │   ├── WebfluxMcpApplication.java         # Main Application
+    │   ├── McpServerApplication.java          # 시작 시 C:/workspace-test/upload/data 자동 인덱싱
     │   ├── config/
-    │   │   └── McpConfig.java                 # MCP Tool 등록
-    │   └── service/
-    │       ├── WeatherService.java            # 관광지 날씨 TCI 조회 Tool
-    │       └── DateTimeService.java           # 현재 시간 조회 Tool
+    │   │   ├── AsyncConfig.java               # 비동기 스레드풀 설정
+    │   │   ├── EgovCommonConfig.java          # eGovFrame 공통 설정
+    │   │   └── McpResourcePromptConfig.java   # @McpResource, @McpPrompt 등록
+    │   ├── controller/
+    │   │   └── DocumentController.java        # 문서 관리 REST API
+    │   ├── dto/
+    │   │   └── DocumentStatusResponse.java
+    │   ├── etl/                               # ETL 파이프라인
+    │   │   ├── readers/                       # MarkdownDocumentReader, PdfDocumentReader
+    │   │   ├── transformers/                  # ContentFormatTransformer, DocumentChunkTransformer
+    │   │   └── writers/                       # VectorStoreDocumentWriter
+    │   ├── model/
+    │   │   └── DocumentMetadata.java          # JPA 엔티티 (파일명, 해시, 인덱싱 시각)
+    │   ├── repository/
+    │   │   └── DocumentMetadataRepository.java
+    │   ├── service/
+    │   │   ├── DocumentManagementService.java
+    │   │   ├── DocumentSearchService.java
+    │   │   ├── DateTimeService.java
+    │   │   └── impl/
+    │   │       ├── DocumentManagementServiceImpl.java
+    │   │       ├── DocumentSearchServiceImpl.java         # @McpTool: searchDocuments, describeKnowledgeBase
+    │   │       ├── DateTimeServiceImpl.java               # @McpTool: getCurrentDateTimeWithZone
+    │   │       └── DocumentClientUploadServiceImpl.java   # @McpTool: uploadAndIndexDocument
+    │   └── util/
+    │       └── DocumentHashUtil.java
     └── resources/
-        └── application.properties             # 애플리케이션 설정
+        ├── application.yml
+        └── model/                             # ONNX 임베딩 모델 (빌드 시 classpath 포함)
+            ├── model.onnx
+            └── tokenizer.json
 ```
+
+---
+
+## 사전 준비
+
+### 1. PostgreSQL + PGVector
+
+```bash
+docker run -d \
+  --name pgvector \
+  -e POSTGRES_DB=ragdb \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+```
+
+PGVector 익스텐션 활성화 (최초 1회):
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+### 2. Ollama (선택)
+
+문서 업로드 시 Sampling(LLM 요약) 기능에 필요합니다. 없어도 기본 검색/인덱싱은 정상 동작합니다.
+
+```bash
+ollama pull qwen3-4b:Q4_K_M
+```
+
+### 3. ONNX 임베딩 모델
+
+`src/main/resources/model/` 디렉토리에 다음 두 파일이 필요합니다.
+
+- `model.onnx` : 임베딩 ONNX 모델 파일 (768차원, 한국어 지원 권장)
+- `tokenizer.json` : 토크나이저 설정 파일
+
+용량이 크므로 Git에 포함되지 않을 수 있습니다. 별도로 복사해 두세요.
+
+### 4. 서버 로컬 문서 디렉토리
+
+시작 시 아래 경로를 자동 인덱싱합니다. 없으면 미리 생성하세요.
+
+```
+C:/workspace-test/upload/data/
+```
+
+---
 
 ## 빌드 및 실행
 
-### 1. 빌드
 ```bash
-cd C:\workspace-test\webflux-mcp-sample\my-webflux-mcp-server
-mvn clean package
+cd C:/workspace-team/my-webflux-mcp-server
+mvn clean package -DskipTests
+java -jar target/my-webflux-mcp-server-*.jar
 ```
 
-### 2. 실행
-```bash
-java -jar target/webflux-mcp-0.0.1-SNAPSHOT.jar
+---
+
+## 접속 URL
+
+| 용도 | URL |
+|------|-----|
+| MCP 엔드포인트 (클라이언트 연결) | `http://localhost:9090/mcp` |
+| Swagger UI | `http://localhost:9090/swagger-ui.html` |
+| 인덱싱 상태 | `http://localhost:9090/api/documents/status` |
+
+---
+
+## application.yml 주요 설정
+
+```yaml
+spring:
+  ai:
+    mcp:
+      server:
+        type: ASYNC           # 비동기 MCP 서버 (WebFlux 필수)
+        protocol: STREAMABLE  # Streamable HTTP 프로토콜
+    embedding.transformer.onnx:
+      modelUri: classpath:model/model.onnx
+    vectorstore.pgvector:
+      dimensions: 768
+      distance-type: COSINE_DISTANCE
+server:
+  port: 9090
+springdoc:
+  paths-to-exclude: /mcp/**  # Swagger에서 MCP 경로 제외
 ```
 
-서버가 시작되면 다음 포트에서 실행됩니다:
-- **Application**: http://localhost:9090
-- **MCP SSE Endpoint**: http://localhost:9090/mcp/sse
-- **API Docs**: http://localhost:9090/v3/api-docs
+---
 
-## MCP 클라이언트 연결 설정
+## 트러블슈팅
 
-### Claude Desktop 설정 예시
-
-`claude_desktop_config.json`:
-```json
-{
-  "mcpServers": {
-    "webflux-weather-api": {
-      "url": "http://localhost:9090/mcp/sse",
-      "transport": "sse"
-    }
-  }
-}
-```
-
-### 원격 서버 연결 예시
-서버를 다른 PC에서 실행한 경우:
-```json
-{
-  "mcpServers": {
-    "webflux-weather-api": {
-      "url": "http://remote-server-ip:9090/mcp/sse",
-      "transport": "sse"
-    }
-  }
-}
-```
-
-## STDIO 방식과의 차이점
-
-| 항목 | STDIO 방식 | WebFlux 방식 (이 프로젝트) |
-|------|-----------|--------------------------|
-| **Dependency** | `spring-ai-starter-mcp-server` | `spring-ai-starter-mcp-server-webflux` |
-| **Transport** | stdin/stdout | HTTP/SSE (Reactive) |
-| **Processing** | 블로킹 I/O | 논블로킹 I/O |
-| **프로세스** | 클라이언트가 직접 시작 | 독립 실행 웹 서버 |
-| **접속 범위** | 로컬 PC만 | 네트워크로 원격 접속 가능 |
-| **동시 접속** | 단일 클라이언트 | 수천+ 클라이언트 (고성능) |
-| **배포 방식** | 각 PC에 jar 파일 배포 | 서버 1대만 실행 |
-| **프로덕션** | 테스트용 | Spring AI 공식 권장 |
-
-## API 문서 확인
-
-서버 실행 후 브라우저에서 다음 URL로 접속:
-- API Docs: http://localhost:9090/v3/api-docs
-
-여기서 MCP 서버가 제공하는 엔드포인트와 스키마를 확인할 수 있습니다.
-
-## 테스트
-
-### MCP Tools 목록 확인
-서버 시작 후 로그에서 등록된 Tool 목록을 확인할 수 있습니다:
-```
-DEBUG com.example.webflux - Registered MCP Tools:
-  - getTouristWeatherIndex
-  - getTouristWeatherByDate
-  - getCityInfo
-  - getCurrentDateTimeWithZone
-```
-
-### 클라이언트 테스트
-Claude Desktop이나 다른 MCP 클라이언트에서:
-1. "서울 강남구 관광지 날씨 알려줘" → `getCityInfo` + `getTouristWeatherIndex` Tool 호출
-2. "제주도 관광지 TCI 지수는?" → `getCityInfo` + `getTouristWeatherIndex` Tool 호출
-3. "서울 시간대의 현재 시간은?" → `getCurrentDateTimeWithZone` Tool 호출
-
-## 주의사항
-
-- `weather.api.key`는 공공데이터포털(기상청 관광지 기후 지수)의 실제 API 키로 교체하세요
-- 프로덕션 환경에서는 보안 설정 (HTTPS, 인증 등)을 추가하세요
-- 방화벽 설정에서 9090 포트를 열어야 원격 접속이 가능합니다
-
-## WebFlux (Reactive) 특징
-
-### 성능 장점
-- **논블로킹 I/O**: 스레드가 I/O 대기 중에도 다른 요청 처리 가능
-- **적은 메모리**: 스레드 스택 메모리를 절약 (요청당 ~1MB → ~10KB)
-- **높은 동시성**: 적은 스레드(4~8개)로 수천 개의 연결 처리
-- **확장성**: 서버 리소스를 효율적으로 활용
-
-### WebMVC vs WebFlux 성능 비교
-
-| 동시 연결 수 | WebMVC | WebFlux (현재) |
-|--------------|--------|----------------|
-| 100명 | 스레드 100개, 메모리 ~100MB | 스레드 8개, 메모리 ~10MB |
-| 500명 | 스레드 500개, 메모리 ~500MB | 스레드 8개, 메모리 ~30MB |
-| 1000명+ | Thread Pool 고갈 가능 | 안정적 처리 |
-
-### 프로덕션 배포 권장
-Spring AI 공식 문서에서 프로덕션 환경에 WebFlux 방식을 권장합니다.
+| 증상 | 원인 | 해결 |
+|------|------|------|
+| `model.onnx not found` | ONNX 모델 파일 누락 | `src/main/resources/model/`에 두 파일 복사 후 재빌드 |
+| PGVector 연결 오류 | PostgreSQL 미실행 또는 `vector` 익스텐션 없음 | Docker 확인, `CREATE EXTENSION IF NOT EXISTS vector;` 실행 |
+| 인덱싱 중 409 Conflict | 이미 인덱싱 진행 중 | `/api/documents/status` 확인 후 완료 대기 |
+| 벡터 차원 불일치 | 모델 출력 차원과 `dimensions` 설정 불일치 | `application.yml`의 `dimensions` 수정, PGVector 테이블 재생성 |
+| Sampling 요약 미생성 | Ollama 미실행 | `http://localhost:11434` 확인. 요약 없이 임베딩만 진행됨 |
+| Swagger에서 MCP API 없음 | 의도된 동작 | `/mcp/**`는 Swagger 제외. `/api/documents/**`만 표시됨 |
