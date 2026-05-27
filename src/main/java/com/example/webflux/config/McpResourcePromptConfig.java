@@ -2,35 +2,32 @@ package com.example.webflux.config;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.stream.Collectors;
 
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.springaicommunity.mcp.annotation.McpArg;
+import org.springaicommunity.mcp.annotation.McpPrompt;
+import org.springaicommunity.mcp.annotation.McpResource;
+import org.springframework.stereotype.Component;
 
 import com.example.webflux.model.DocumentMetadata;
 import com.example.webflux.repository.DocumentMetadataRepository;
 
-import io.modelcontextprotocol.server.McpAsyncServerExchange;
-import io.modelcontextprotocol.server.McpServerFeatures;
-import io.modelcontextprotocol.spec.McpSchema;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 /**
- * MCP Resource / Prompt 등록 설정
+ * MCP Resource / Prompt 등록 컴포넌트
  *
- * Resource: 인덱싱된 문서 목록 (resource://documents/index)
- *   → LLM이 리소스를 읽어 어떤 파일이 검색 가능한지 파악
+ * @McpResource: 읽기 전용 데이터 소스 노출 (resource://documents/index)
+ *   → LLM이 어떤 파일이 검색 가능한지 사전 파악
  *   → searchDocuments 호출 전 사전 확인 용도
  *
- * Prompt: RAG 시스템 프롬프트 (rag_assistant)
- *   → 클라이언트가 이 프롬프트를 system 메시지로 사용하면
- *     LLM이 반드시 searchDocuments를 호출하도록 유도
+ * @McpPrompt: 재사용 가능한 프롬프트 템플릿 (rag_assistant)
+ *   → 클라이언트가 system 메시지로 사용하면 LLM이 searchDocuments를 우선 호출
  *   → strict 파라미터로 엄격도 조정 가능
  */
-@Configuration
+@Component
 @RequiredArgsConstructor
 public class McpResourcePromptConfig {
 
@@ -42,36 +39,20 @@ public class McpResourcePromptConfig {
      * MCP Resource는 LLM이 읽기 전용으로 접근하는 데이터 소스입니다.
      * 도구(Tool)와의 차이: 도구는 실행/검색, 리소스는 정적 데이터 노출
      *
-     * 사용 예: 클라이언트에서 "어떤 문서가 인덱싱되어 있나요?" 질문 시
-     *          LLM이 resource://documents/index 를 읽어 파일 목록 반환
+     * - URI: resource://documents/index
+     * - 반환: 인덱싱된 파일 목록 텍스트
+     * - JPA 블로킹 호출이므로 boundedElastic 스케줄러로 격리
      */
-    @Bean
-    public List<McpServerFeatures.AsyncResourceSpecification> mcpResources() {
-
-        var resource = McpSchema.Resource.builder()
-                .uri("resource://documents/index")  // URI (클라이언트가 이 주소로 읽기 요청)
-                .name("인덱싱된 문서 목록")
-                .description("RAG 지식 베이스에 등록된 검색 가능한 문서 목록. "
-                        + "searchDocuments 호출 전 어떤 파일이 있는지 확인할 수 있습니다.")
-                .mimeType("text/plain")
-                .build();
-
-        var specification = new McpServerFeatures.AsyncResourceSpecification(
-                resource,
-                (McpAsyncServerExchange exchange, McpSchema.ReadResourceRequest request) ->
-                        // JPA 블로킹 호출 → boundedElastic으로 격리
-                        Mono.fromCallable(() -> buildDocumentIndex())
-                                .subscribeOn(Schedulers.boundedElastic())
-                                .map(content -> new McpSchema.ReadResourceResult(
-                                        List.of(new McpSchema.TextResourceContents(
-                                                "resource://documents/index",
-                                                "text/plain",
-                                                content
-                                        ))
-                                ))
-        );
-
-        return List.of(specification);
+    @McpResource(
+            uri = "resource://documents/index",
+            name = "인덱싱된 문서 목록",
+            description = "RAG 지식 베이스에 등록된 검색 가능한 문서 목록. "
+                    + "searchDocuments 호출 전 어떤 파일이 있는지 확인할 수 있습니다.",
+            mimeType = "text/plain"
+    )
+    public Mono<String> getDocumentIndex() {
+        return Mono.fromCallable(this::buildDocumentIndex)
+                .subscribeOn(Schedulers.boundedElastic());
     }
 
     /**
@@ -80,50 +61,23 @@ public class McpResourcePromptConfig {
      * MCP Prompt는 재사용 가능한 프롬프트 템플릿입니다.
      * 도구(Tool)와의 차이: 도구는 기능 실행, 프롬프트는 LLM 행동 지침 제공
      *
-     * 사용 예: 클라이언트가 이 프롬프트를 system 메시지로 주입하면
-     *          LLM이 기술 질문에 반드시 searchDocuments를 먼저 호출
-     *
-     * 파라미터:
-     *   strict=false (기본): 기술 질문에만 검색 강제
-     *   strict=true         : 모든 질문에 검색 강제, 검색 결과 없으면 답변 거부
+     * - strict=false (기본): 기술 질문에만 searchDocuments 강제
+     * - strict=true        : 모든 질문에 검색 강제, 검색 결과 없으면 답변 거부
      */
-    @Bean
-    public List<McpServerFeatures.AsyncPromptSpecification> mcpPrompts() {
-
-        var prompt = new McpSchema.Prompt(
-                "rag_assistant",
-                "RAG 기반 문서 검색을 위한 시스템 프롬프트. "
-                        + "클라이언트가 system 메시지로 사용하여 LLM의 RAG 검색을 유도합니다.",
-                List.of(
-                        new McpSchema.PromptArgument(
-                                "strict",
-                                "엄격 모드 여부 (true/false). "
-                                        + "true이면 모든 질문에 검색 강제, 검색 결과 없으면 답변 거부.",
-                                false
-                        )
-                )
-        );
-
-        var specification = new McpServerFeatures.AsyncPromptSpecification(
-                prompt,
-                (McpAsyncServerExchange exchange, McpSchema.GetPromptRequest request) -> {
-                    boolean strict = Optional.ofNullable(request.arguments())
-                            .map(args -> "true".equals(args.get("strict")))
-                            .orElse(false);
-
-                    String systemText = strict ? STRICT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT;
-
-                    return Mono.just(new McpSchema.GetPromptResult(
-                            "RAG 문서 검색 시스템 프롬프트 (" + (strict ? "엄격" : "기본") + " 모드)",
-                            List.of(new McpSchema.PromptMessage(
-                                    McpSchema.Role.ASSISTANT,
-                                    new McpSchema.TextContent(systemText)
-                            ))
-                    ));
-                }
-        );
-
-        return List.of(specification);
+    @McpPrompt(
+            name = "rag_assistant",
+            description = "RAG 기반 문서 검색을 위한 시스템 프롬프트. "
+                    + "클라이언트가 system 메시지로 사용하여 LLM의 RAG 검색을 유도합니다."
+    )
+    public String buildRagPrompt(
+            @McpArg(
+                    name = "strict",
+                    description = "엄격 모드 여부 (true/false). "
+                            + "true이면 모든 질문에 검색 강제, 검색 결과 없으면 답변 거부.",
+                    required = false
+            ) String strict
+    ) {
+        return "true".equalsIgnoreCase(strict) ? STRICT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

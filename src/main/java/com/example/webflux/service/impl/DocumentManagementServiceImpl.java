@@ -42,6 +42,9 @@ import reactor.core.publisher.Mono;
 @RequiredArgsConstructor
 public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl implements DocumentManagementService {
 
+    private static final long MAX_UPLOAD_SIZE_BYTES = 20L * 1024 * 1024; // 20MB
+    private static final int  MAX_UPLOAD_FILE_COUNT = 5;
+
     @Value("${app.document.upload-dir:C:/workspace-test/upload/data}")
     private String uploadDir;
 
@@ -50,7 +53,6 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
     private final ContentFormatTransformer contentFormatTransformer;
     private final DocumentChunkTransformer documentChunkTransformer;
     private final VectorStoreDocumentWriter vectorStoreWriter;
-    private final PgVectorStore pgVectorStore;
     private final DocumentMetadataRepository metadataRepository;
     private final Executor documentProcessingExecutor;
 
@@ -75,13 +77,12 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
 
     @Override
     public CompletableFuture<Integer> loadDocumentsAsync() {
-        if (isProcessing.get()) {
+        log.info("ETL 파이프라인으로 문서 처리 시작");
+        // compareAndSet으로 중복 실행을 원자적으로 방지
+        if (!isProcessing.compareAndSet(false, true)) {
             log.warn("이미 문서 처리가 진행 중입니다.");
             return CompletableFuture.completedFuture(0);
         }
-
-        log.info("ETL 파이프라인으로 문서 처리 시작");
-        isProcessing.set(true);
         processedCount.set(0);
         totalCount.set(0);
         changedCount.set(0);
@@ -149,22 +150,12 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
     @Override
     public String reindexDocuments() {
         log.info("문서 재인덱싱 요청 수신");
-        CompletableFuture<Integer> future = this.loadDocumentsAsync();
-
-        // 이미 인덱싱 중이면 0이 즉시 반환됨 → 예외로 알림
-        if (future.isDone()) {
-            try {
-                if (future.get() == 0) {
-                    throw new IllegalStateException("이미 문서 인덱싱이 진행 중입니다.");
-                }
-            } catch (IllegalStateException e) {
-                throw e;
-            } catch (Exception e) {
-                log.error("상태 확인 중 오류", e);
-                throw new RuntimeException("상태 확인 중 오류가 발생했습니다: " + e.getMessage(), e);
-            }
+        // isProcessing 선체크: 이미 진행 중이면 즉시 예외 (컨트롤러에서 409로 매핑됨)
+        if (isProcessing.get()) {
+            throw new IllegalStateException("이미 문서 인덱싱이 진행 중입니다.");
         }
 
+        CompletableFuture<Integer> future = this.loadDocumentsAsync();
         future.thenAccept(count -> log.info("재인덱싱 완료: {}개 청크 처리됨", count))
               .exceptionally(throwable -> {
                   log.error("재인덱싱 중 오류 발생", throwable);
@@ -186,9 +177,9 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
                 return Mono.just(result);
             }
 
-            if (fileList.size() > 5) {
+            if (fileList.size() > MAX_UPLOAD_FILE_COUNT) {
                 result.put("success", false);
-                result.put("message", "최대 5개 파일만 업로드할 수 있습니다.");
+                result.put("message", "최대 " + MAX_UPLOAD_FILE_COUNT + "개 파일만 업로드할 수 있습니다.");
                 result.put("files", Collections.emptyList());
                 return Mono.just(result);
             }
@@ -209,6 +200,19 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
 
                     if (!filename.endsWith(".md")) {
                         return Mono.error(new IllegalArgumentException("마크다운(.md) 파일만 업로드 가능합니다."));
+                    }
+
+                    // 파일 크기 선검사 (Content-Length 헤더 기반, best-effort)
+                    String contentLengthHeader = filePart.headers()
+                            .getFirst(org.springframework.http.HttpHeaders.CONTENT_LENGTH);
+                    if (contentLengthHeader != null) {
+                        try {
+                            long size = Long.parseLong(contentLengthHeader);
+                            if (size > MAX_UPLOAD_SIZE_BYTES) {
+                                return Mono.error(new IllegalArgumentException(
+                                        filename + " 파일 크기가 20MB를 초과합니다."));
+                            }
+                        } catch (NumberFormatException ignored) { }
                     }
 
                     File dest = new File(dir, filename);

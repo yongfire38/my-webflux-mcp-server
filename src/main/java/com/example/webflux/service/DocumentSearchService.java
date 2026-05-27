@@ -1,6 +1,8 @@
 package com.example.webflux.service;
 
+import reactor.core.publisher.Mono;
+
 public interface DocumentSearchService {
 
-    String searchDocuments(String query);
+    Mono<String> searchDocuments(String query);
 }

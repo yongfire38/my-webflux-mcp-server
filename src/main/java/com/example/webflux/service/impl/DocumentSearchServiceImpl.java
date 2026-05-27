@@ -6,8 +6,8 @@ import java.util.stream.Collectors;
 
 import org.egovframe.rte.fdl.cmmn.EgovAbstractServiceImpl;
 import org.springframework.ai.document.Document;
-import org.springframework.ai.tool.annotation.Tool;
-import org.springframework.ai.tool.annotation.ToolParam;
+import org.springaicommunity.mcp.annotation.McpTool;
+import org.springaicommunity.mcp.annotation.McpToolParam;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,6 +19,8 @@ import com.example.webflux.service.DocumentSearchService;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 @Service
 @Slf4j
@@ -44,18 +46,17 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
      * LLM이 자체 학습 지식 대신 문서 검색을 우선하도록 유도합니다.
      */
     @Override
-    @Tool(name = "searchDocuments",
-          description = "【필수 RAG 도구】 기술 문서에서 관련 내용을 벡터 유사도 검색합니다. "
-                  + "다음 질문 유형에는 반드시 이 도구를 먼저 호출하세요: "
-                  + "설정 방법, 사용법, 오류 해결, 코드 예제, API 설명, 아키텍처 문의. "
+    @McpTool(name = "searchDocuments",
+          description = "【필수 RAG 도구】 지식 베이스에 저장된 모든 문서에서 관련 내용을 벡터 유사도 검색합니다. "
+                  + "사용자가 어떤 주제(기술, 제품, 역사, 사용법 등)에 대해 질문하면 반드시 이 도구를 먼저 호출하세요. "
                   + "검색 없이 학습 지식으로만 답변하지 마세요. "
                   + "결과가 없으면 describeKnowledgeBase로 인덱싱 현황을 확인하세요.")
-    public String searchDocuments(
-            @ToolParam(description = "검색 질의문. 구체적일수록 정확도가 높아집니다.") String query
+    public Mono<String> searchDocuments(
+            @McpToolParam(description = "검색 질의문. 구체적일수록 정확도가 높아집니다.") String query
     ) {
         log.info("문서 검색 - 질의: {}", query);
 
-        try {
+        return Mono.fromCallable(() -> {
             List<Document> results = vectorStore.similaritySearch(
                     SearchRequest.builder()
                             .query(query)
@@ -82,16 +83,15 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
                     content = content.substring(0, maxContentLength) + "...";
                 }
                 String source = (String) doc.getMetadata().getOrDefault("source", "unknown");
+                double score = doc.getScore() != null ? doc.getScore() : 0.0;
 
-                sb.append(String.format("[%d] 출처: %s\n%s\n\n", i + 1, source, content));
+                sb.append(String.format("[%d] 출처: %s (유사도: %.3f)\n%s\n\n", i + 1, source, score, content));
             }
 
             return sb.toString();
 
-        } catch (Exception e) {
-            log.error("문서 검색 중 오류", e);
-            return "문서 검색 중 오류가 발생했습니다: " + e.getMessage();
-        }
+        }).subscribeOn(Schedulers.boundedElastic())
+          .onErrorReturn("문서 검색 중 오류가 발생했습니다.");
     }
 
     /**
@@ -100,14 +100,14 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
      * searchDocuments 호출 전에 어떤 파일이 인덱싱되어 있는지 파악하는 용도.
      * "이 주제가 문서에 있나요?" → describeKnowledgeBase → searchDocuments 2단계 패턴 유도.
      */
-    @Tool(name = "describeKnowledgeBase",
+    @McpTool(name = "describeKnowledgeBase",
           description = "RAG 지식 베이스에 인덱싱된 문서 현황을 조회합니다. "
                   + "searchDocuments 호출 전 어떤 파일이 검색 가능한지 확인하세요. "
                   + "'어떤 문서가 있나요?', '검색 가능한 주제는?' 질문에 사용합니다.")
-    public String describeKnowledgeBase() {
+    public Mono<String> describeKnowledgeBase() {
         log.info("지식 베이스 현황 조회");
 
-        try {
+        return Mono.fromCallable(() -> {
             long totalChunks = documentMetadataRepository.count();
 
             if (totalChunks == 0) {
@@ -128,9 +128,7 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
 
             return sb.toString();
 
-        } catch (Exception e) {
-            log.error("지식 베이스 조회 중 오류", e);
-            return "지식 베이스 조회 중 오류가 발생했습니다: " + e.getMessage();
-        }
+        }).subscribeOn(Schedulers.boundedElastic())
+          .onErrorReturn("지식 베이스 조회 중 오류가 발생했습니다.");
     }
 }

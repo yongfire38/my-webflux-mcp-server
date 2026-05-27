@@ -1,6 +1,8 @@
 package com.example.webflux.service;
 
+import reactor.core.publisher.Mono;
+
 public interface DateTimeService {
 
-    String getCurrentDateTimeWithZone(String zoneId);
+    Mono<String> getCurrentDateTimeWithZone(String zoneId);
 }
