@@ -42,7 +42,7 @@ import reactor.core.publisher.Mono;
 @RequiredArgsConstructor
 public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl implements DocumentManagementService {
 
-    private static final long MAX_UPLOAD_SIZE_BYTES = 20L * 1024 * 1024; // 20MB
+    private static final long MAX_UPLOAD_SIZE_BYTES = 50L * 1024 * 1024; // 50MB
     private static final int  MAX_UPLOAD_FILE_COUNT = 5;
 
     @Value("${app.document.upload-dir:C:/workspace-test/upload/data}")
@@ -210,7 +210,7 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
                             long size = Long.parseLong(contentLengthHeader);
                             if (size > MAX_UPLOAD_SIZE_BYTES) {
                                 return Mono.error(new IllegalArgumentException(
-                                        filename + " 파일 크기가 20MB를 초과합니다."));
+                                        filename + " 파일 크기가 50MB를 초과합니다."));
                             }
                         } catch (NumberFormatException ignored) { }
                     }
