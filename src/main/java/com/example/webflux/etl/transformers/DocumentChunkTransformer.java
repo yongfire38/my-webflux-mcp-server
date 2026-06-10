@@ -32,13 +32,13 @@ public class DocumentChunkTransformer implements DocumentTransformer {
         log.info("TokenTextSplitter 설정 - chunkSize: {}, minChunkSizeChars: {}, minChunkLengthToEmbed: {}, maxNumChunks: {}",
                 chunkSize, minChunkSizeChars, minChunkLengthToEmbed, maxNumChunks);
 
-        TokenTextSplitter textSplitter = new TokenTextSplitter(
-            chunkSize,
-            minChunkSizeChars,
-            minChunkLengthToEmbed,
-            maxNumChunks,
-            true
-        );
+        TokenTextSplitter textSplitter = TokenTextSplitter.builder()
+                .withChunkSize(chunkSize)
+                .withMinChunkSizeChars(minChunkSizeChars)
+                .withMinChunkLengthToEmbed(minChunkLengthToEmbed)
+                .withMaxNumChunks(maxNumChunks)
+                .withKeepSeparator(true)
+                .build();
 
         List<Document> splitDocs = textSplitter.apply(documents);
         log.info("문서 청크 분할 완료: {}개 청크 생성", splitDocs.size());
