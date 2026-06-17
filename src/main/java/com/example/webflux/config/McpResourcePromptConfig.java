@@ -1,20 +1,14 @@
 package com.example.webflux.config;
 
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
-
 import org.springaicommunity.mcp.annotation.McpArg;
 import org.springaicommunity.mcp.annotation.McpPrompt;
 import org.springaicommunity.mcp.annotation.McpResource;
 import org.springframework.stereotype.Component;
 
-import com.example.webflux.model.DocumentMetadata;
-import com.example.webflux.repository.DocumentMetadataRepository;
+import com.example.webflux.service.DocumentSearchService;
 
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 /**
  * MCP Resource / Prompt 등록 컴포넌트
@@ -31,7 +25,7 @@ import reactor.core.scheduler.Schedulers;
 @RequiredArgsConstructor
 public class McpResourcePromptConfig {
 
-    private final DocumentMetadataRepository documentMetadataRepository;
+    private final DocumentSearchService documentSearchService;
 
     /**
      * [Resource 예시] 인덱싱된 문서 목록
@@ -41,7 +35,7 @@ public class McpResourcePromptConfig {
      *
      * - URI: resource://documents/index
      * - 반환: 인덱싱된 파일 목록 텍스트
-     * - JPA 블로킹 호출이므로 boundedElastic 스케줄러로 격리
+     * - describeKnowledgeBase MCP Tool과 동일 로직이므로 DocumentSearchService에 위임
      */
     @McpResource(
             uri = "resource://documents/index",
@@ -51,8 +45,7 @@ public class McpResourcePromptConfig {
             mimeType = "text/plain"
     )
     public Mono<String> getDocumentIndex() {
-        return Mono.fromCallable(this::buildDocumentIndex)
-                .subscribeOn(Schedulers.boundedElastic());
+        return documentSearchService.describeKnowledgeBase();
     }
 
     /**
@@ -78,32 +71,6 @@ public class McpResourcePromptConfig {
             ) String strict
     ) {
         return "true".equalsIgnoreCase(strict) ? STRICT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // private helpers
-    // ─────────────────────────────────────────────────────────────────────────
-
-    private String buildDocumentIndex() {
-        long totalChunks = documentMetadataRepository.count();
-
-        if (totalChunks == 0) {
-            return "인덱싱된 문서가 없습니다. 문서를 먼저 업로드하고 인덱싱하세요.";
-        }
-
-        List<DocumentMetadata> all = documentMetadataRepository.findAll();
-        Map<String, Long> fileChunks = all.stream()
-                .collect(Collectors.groupingBy(DocumentMetadata::getFilename, Collectors.counting()));
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("=== RAG 지식 베이스 문서 목록 ===\n");
-        sb.append(String.format("총 파일 수: %d개 | 총 청크 수: %d개\n\n", fileChunks.size(), totalChunks));
-        sb.append("파일 목록:\n");
-        fileChunks.forEach((filename, count) ->
-                sb.append(String.format("  - %s (%d 청크)\n", filename, count)));
-        sb.append("\n이 파일들의 내용을 searchDocuments 도구로 검색할 수 있습니다.");
-
-        return sb.toString();
     }
 
     // ─────────────────────────────────────────────────────────────────────────

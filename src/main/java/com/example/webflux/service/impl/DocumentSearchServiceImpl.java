@@ -100,6 +100,7 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
      * searchDocuments 호출 전에 어떤 파일이 인덱싱되어 있는지 파악하는 용도.
      * "이 주제가 문서에 있나요?" → describeKnowledgeBase → searchDocuments 2단계 패턴 유도.
      */
+    @Override
     @McpTool(name = "describeKnowledgeBase",
           description = "RAG 지식 베이스에 인덱싱된 문서 현황을 조회합니다. "
                   + "searchDocuments 호출 전 어떤 파일이 검색 가능한지 확인하세요. "
