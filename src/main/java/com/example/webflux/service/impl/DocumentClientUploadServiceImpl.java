@@ -25,6 +25,9 @@ import com.example.webflux.etl.transformers.DocumentChunkTransformer;
 import com.example.webflux.model.DocumentMetadata;
 import com.example.webflux.repository.DocumentMetadataRepository;
 import com.example.webflux.util.DocumentHashUtil;
+import com.example.webflux.util.DocumentOverwriteForbiddenException;
+import com.example.webflux.util.PromptInjectionDetectedException;
+import com.example.webflux.util.PromptInjectionDetector;
 
 import io.modelcontextprotocol.spec.McpSchema;
 import lombok.RequiredArgsConstructor;
@@ -85,13 +88,22 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
             @McpToolParam(description = "파일 내용을 Base64 인코딩한 문자열") String base64Content,
             @McpToolParam(description = "MIME 타입: application/pdf 또는 text/markdown") String mimeType
     ) {
-        log.info("[업로드] 요청 수신 — jobId: {}, filename: {}, mimeType: {}", jobId, filename, mimeType);
+        // MCP 프로토콜 initialize 핸드셰이크의 clientInfo.name — 업로드 출처 식별자로 사용
+        String clientId = ctx.clientInfo() != null ? ctx.clientInfo().name() : "unknown";
+        log.info("[업로드] 요청 수신 — jobId: {}, filename: {}, mimeType: {}, clientId: {}",
+                jobId, filename, mimeType, clientId);
 
         return Mono.fromCallable(() -> {
+            // 0단계: 타 클라이언트(또는 REST 경로)가 적재한 문서의 덮어쓰기 차단 — 파일 내용을 읽기 전에 먼저 검사
+            checkOverwriteOwnership(filename, clientId, jobId);
+
             // 1단계: base64 디코딩 + 텍스트 추출
             byte[] fileBytes = decodeBase64(base64Content, jobId, filename);
-            List<Document> rawDocuments = extractDocuments(fileBytes, filename, mimeType);
+            List<Document> rawDocuments = extractDocuments(fileBytes, filename, mimeType, clientId);
             log.info("[업로드][{}] 텍스트 추출 완료 — {}페이지", jobId, rawDocuments.size());
+
+            // 자연어 프롬프트 인젝션 의심 패턴 검사 — 발견 시 업로드 자체를 거부
+            checkPromptInjection(rawDocuments, jobId, filename);
 
             return rawDocuments;
         })
@@ -132,7 +144,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
             // 4단계: 벡터 저장소 임베딩 + 메타데이터 저장
             pgVectorStore.add(ctx3.chunks());
             // rawDocuments 기준으로 메타데이터 저장 (page_number 활용, loadDocumentsAsync와 동일 방식)
-            saveMetadata(filename, ctx3.rawDocuments(), ctx3.summary());
+            saveMetadata(filename, ctx3.rawDocuments(), ctx3.summary(), clientId);
             log.info("[업로드][{}] 임베딩 완료 — {}개 청크 저장", jobId, ctx3.chunks().size());
 
             return ctx3.chunks().size();
@@ -144,12 +156,49 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
                        jobId, filename, chunkCount))
         )
         .doOnError(e -> log.error("[업로드][{}] 처리 중 오류 발생 — {}", jobId, e.getMessage(), e))
+        .onErrorResume(PromptInjectionDetectedException.class,
+                e -> Mono.just(String.format("[%s] %s 업로드가 거부되었습니다 — %s", jobId, filename, e.getMessage())))
+        .onErrorResume(DocumentOverwriteForbiddenException.class,
+                e -> Mono.just(String.format("[%s] %s 업로드가 거부되었습니다 — %s", jobId, filename, e.getMessage())))
         .onErrorReturn(String.format("[%s] %s 처리 중 오류가 발생했습니다.", jobId, filename));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // private helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * 동일 파일명으로 이미 적재된 문서가 있고, 그 출처(sourceClient)가 지금 요청한 클라이언트와 다르면
+     * (REST 경로로 적재되어 sourceClient가 null인 경우도 포함) 덮어쓰기를 거부한다.
+     * 신규 파일(기존 메타데이터 없음)은 제약 없이 통과한다.
+     */
+    private void checkOverwriteOwnership(String filename, String clientId, String jobId) {
+        List<DocumentMetadata> existing = metadataRepository.findByFilename(filename);
+        for (DocumentMetadata meta : existing) {
+            String existingOwner = meta.getSourceClient();
+            if (existingOwner == null || !existingOwner.equals(clientId)) {
+                log.warn("[업로드][{}] 타 클라이언트 문서 덮어쓰기 시도 차단 — {} (기존 출처: {}, 요청 클라이언트: {})",
+                        jobId, filename, existingOwner, clientId);
+                throw new DocumentOverwriteForbiddenException(
+                        "이미 다른 클라이언트가 적재한 문서입니다. 덮어쓸 수 없습니다: " + filename);
+            }
+        }
+    }
+
+    /**
+     * 문서 내용에서 자연어 프롬프트 인젝션 의심 패턴을 검사한다.
+     * 발견되면 업로드 자체를 거부한다 (KB 신뢰성을 오탐 가능성보다 우선).
+     */
+    private void checkPromptInjection(List<Document> rawDocuments, String jobId, String filename) {
+        for (Document doc : rawDocuments) {
+            Optional<String> matched = PromptInjectionDetector.detect(doc.getText());
+            if (matched.isPresent()) {
+                log.warn("[업로드][{}] 프롬프트 인젝션 의심 패턴 탐지 — {} (패턴: {})", jobId, filename, matched.get());
+                throw new PromptInjectionDetectedException(
+                        "문서 내용에서 지시 탈취(prompt injection)로 의심되는 패턴이 발견되어 업로드를 거부했습니다.");
+            }
+        }
+    }
 
     private byte[] decodeBase64(String base64Content, String jobId, String filename) {
         try {
@@ -165,18 +214,18 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
      * PDF: PagePdfDocumentReader (ByteArrayResource 사용)
      * MD:  UTF-8 문자열 → 단일 Document
      */
-    private List<Document> extractDocuments(byte[] fileBytes, String filename, String mimeType) {
+    private List<Document> extractDocuments(byte[] fileBytes, String filename, String mimeType, String clientId) {
         boolean isPdf = "application/pdf".equalsIgnoreCase(mimeType)
                 || filename.toLowerCase().endsWith(".pdf");
 
         if (isPdf) {
-            return extractPdf(fileBytes, filename);
+            return extractPdf(fileBytes, filename, clientId);
         } else {
-            return extractMarkdown(fileBytes, filename);
+            return extractMarkdown(fileBytes, filename, clientId);
         }
     }
 
-    private List<Document> extractPdf(byte[] pdfBytes, String filename) {
+    private List<Document> extractPdf(byte[] pdfBytes, String filename, String clientId) {
         try {
             ByteArrayResource resource = new ByteArrayResource(pdfBytes) {
                 @Override
@@ -206,7 +255,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
                 meta.put("file_name", filename);
                 meta.put("type", "pdf");
                 meta.put("page_number", i + 1);
-                meta.put("upload_source", "client");
+                meta.put("upload_source", clientId);
                 result.add(new Document(content, meta));
             }
 
@@ -219,7 +268,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
         }
     }
 
-    private List<Document> extractMarkdown(byte[] mdBytes, String filename) {
+    private List<Document> extractMarkdown(byte[] mdBytes, String filename, String clientId) {
         try {
             String content = new String(mdBytes, StandardCharsets.UTF_8);
             if (content.isBlank()) {
@@ -231,7 +280,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
             meta.put("source", filename);
             meta.put("file_name", filename);
             meta.put("type", "markdown");
-            meta.put("upload_source", "client");
+            meta.put("upload_source", clientId);
 
             log.info("[MD 추출] {} — {}자", filename, content.length());
             return List.of(new Document(content, meta));
@@ -298,7 +347,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
      * 같은 파일을 두 인덱싱 경로(REST reindex / MCP uploadAndIndexDocument)로 처리해도
      * document_metadata 테이블의 chunkIndex 기준이 일치하여 변경 감지가 올바르게 동작합니다.
      */
-    private void saveMetadata(String filename, List<Document> rawDocuments, String summary) {
+    private void saveMetadata(String filename, List<Document> rawDocuments, String summary, String clientId) {
         for (Document doc : rawDocuments) {
             String content = doc.getText();
             if (content == null || content.isBlank()) continue;
@@ -318,8 +367,9 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
                     meta = existing.get();
                     meta.setContentHash(hash);
                     meta.setIndexedAt(LocalDateTime.now());
+                    meta.setSourceClient(clientId);
                 } else {
-                    meta = new DocumentMetadata(null, filename, chunkIndex, hash, LocalDateTime.now());
+                    meta = new DocumentMetadata(null, filename, chunkIndex, hash, LocalDateTime.now(), clientId);
                 }
 
                 metadataRepository.save(meta);
@@ -328,7 +378,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
             }
         }
 
-        log.info("[메타데이터 저장] {} — {}개 페이지/문서, 요약: {}자",
-                filename, rawDocuments.size(), summary.length());
+        log.info("[메타데이터 저장] {} — {}개 페이지/문서, 요약: {}자, clientId: {}",
+                filename, rawDocuments.size(), summary.length(), clientId);
     }
 }
