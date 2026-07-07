@@ -26,6 +26,7 @@ import com.example.webflux.model.DocumentMetadata;
 import com.example.webflux.repository.DocumentMetadataRepository;
 import com.example.webflux.util.DocumentHashUtil;
 import com.example.webflux.util.DocumentOverwriteForbiddenException;
+import com.example.webflux.util.StaleVectorCleaner;
 import com.example.webflux.util.PromptInjectionDetectedException;
 import com.example.webflux.util.PromptInjectionDetector;
 
@@ -54,6 +55,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
     private final DocumentChunkTransformer documentChunkTransformer;
     private final PgVectorStore pgVectorStore;
     private final DocumentMetadataRepository metadataRepository;
+    private final StaleVectorCleaner staleVectorCleaner;
 
     private static final int PROGRESS_TOTAL_STEPS = 4;
 
@@ -141,7 +143,9 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
                .thenReturn(ctx3)
         )
         .flatMap(ctx3 -> Mono.fromCallable(() -> {
-            // 4단계: 벡터 저장소 임베딩 + 메타데이터 저장
+            // 4단계: stale 벡터 선삭제 후 새 청크 임베딩
+            // 같은 클라이언트의 파일 갱신(checkOverwriteOwnership 통과) 시 구버전 벡터 누적 방지
+            staleVectorCleaner.deleteBySource(filename);
             pgVectorStore.add(ctx3.chunks());
             // rawDocuments 기준으로 메타데이터 저장 (page_number 활용, loadDocumentsAsync와 동일 방식)
             saveMetadata(filename, ctx3.rawDocuments(), ctx3.summary(), clientId);

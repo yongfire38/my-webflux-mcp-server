@@ -16,7 +16,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.egovframe.rte.fdl.cmmn.EgovAbstractServiceImpl;
 import org.springframework.ai.document.Document;
-import org.springframework.ai.vectorstore.pgvector.PgVectorStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
@@ -31,6 +30,7 @@ import com.example.webflux.model.DocumentMetadata;
 import com.example.webflux.repository.DocumentMetadataRepository;
 import com.example.webflux.service.DocumentManagementService;
 import com.example.webflux.util.DocumentHashUtil;
+import com.example.webflux.util.StaleVectorCleaner;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -54,6 +54,7 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
     private final DocumentChunkTransformer documentChunkTransformer;
     private final VectorStoreDocumentWriter vectorStoreWriter;
     private final DocumentMetadataRepository metadataRepository;
+    private final StaleVectorCleaner staleVectorCleaner;
     private final Executor documentProcessingExecutor;
 
     private final AtomicBoolean isProcessing = new AtomicBoolean(false);
@@ -110,6 +111,18 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
                 if (changedDocuments.isEmpty()) {
                     log.info("변경된 문서가 없습니다. 인덱싱 작업을 건너뜁니다.");
                     return 0;
+                }
+
+                // 2-1단계: 변경된 문서의 기존 stale 벡터 선삭제
+                // PDF는 페이지 단위(page_number), MD는 파일 전체(source)로 삭제 범위를 한정
+                for (Document doc : changedDocuments) {
+                    String src = (String) doc.getMetadata().get("source");
+                    Object pageNum = doc.getMetadata().get("page_number");
+                    if (pageNum instanceof Integer p) {
+                        staleVectorCleaner.deleteBySourceAndPage(src, p);
+                    } else {
+                        staleVectorCleaner.deleteBySource(src);
+                    }
                 }
 
                 // 3단계: 문서 형식 정규화
