@@ -1,5 +1,7 @@
 package com.example.webflux.service.impl;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -11,11 +13,15 @@ import org.springaicommunity.mcp.annotation.McpToolParam;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.example.webflux.model.DocumentMetadata;
 import com.example.webflux.repository.DocumentMetadataRepository;
 import com.example.webflux.service.DocumentSearchService;
+import com.example.webflux.util.RrfFusion;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -29,6 +35,8 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
 
     private final VectorStore vectorStore;
     private final DocumentMetadataRepository documentMetadataRepository;
+    private final JdbcTemplate jdbcTemplate;
+    private final PlatformTransactionManager transactionManager;
 
     @Value("${app.rag.similarity-threshold:0.30}")
     private double similarityThreshold;
@@ -38,6 +46,22 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
 
     @Value("${app.rag.max-content-length:2000}")
     private int maxContentLength;
+
+    @Value("${app.rag.hybrid.enabled:false}")
+    private boolean hybridEnabled;
+
+    @Value("${app.rag.hybrid.weight.dense:1.0}")
+    private double hybridDenseWeight;
+
+    @Value("${app.rag.hybrid.weight.lexical:1.0}")
+    private double hybridLexicalWeight;
+
+    @Value("${spring.ai.vectorstore.pgvector.table-name:vector_store}")
+    private String vectorStoreTable;
+
+    // pg_trgm.word_similarity_threshold 기본값 0.6은 너무 엄격 — 트랜잭션 스코프로 0.30으로 설정
+    @Value("${app.rag.hybrid.lexical.word-similarity-threshold:0.30}")
+    private double wordSimilarityThreshold;
 
     /**
      * [RAG 핵심 도구] 벡터 유사도 기반 문서 검색
@@ -54,16 +78,10 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
     public Mono<String> searchDocuments(
             @McpToolParam(description = "검색 질의문. 구체적일수록 정확도가 높아집니다.") String query
     ) {
-        log.info("문서 검색 - 질의: {}", query);
+        log.info("문서 검색 ({}) - 질의: {}", hybridEnabled ? "하이브리드" : "dense", query);
 
         return Mono.fromCallable(() -> {
-            List<Document> results = vectorStore.similaritySearch(
-                    SearchRequest.builder()
-                            .query(query)
-                            .topK(topK)
-                            .similarityThreshold(similarityThreshold)
-                            .build()
-            );
+            List<Document> results = hybridEnabled ? hybridSearch(query) : denseSearch(query);
 
             if (results == null || results.isEmpty()) {
                 log.info("검색 결과 없음 - 질의: {}", query);
@@ -74,7 +92,8 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
             log.info("검색 결과 {}건 - 질의: {}", results.size(), query);
 
             StringBuilder sb = new StringBuilder();
-            sb.append(String.format("검색 결과 %d건 (유사도 임계값: %.2f)\n\n", results.size(), similarityThreshold));
+            sb.append(String.format("검색 결과 %d건 (모드: %s)\n\n",
+                    results.size(), hybridEnabled ? "하이브리드(dense+lexical RRF)" : "dense"));
 
             for (int i = 0; i < results.size(); i++) {
                 Document doc = results.get(i);
@@ -131,5 +150,100 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
 
         }).subscribeOn(Schedulers.boundedElastic())
           .onErrorReturn("지식 베이스 조회 중 오류가 발생했습니다.");
+    }
+
+    // ── private helpers ──────────────────────────────────────────────────────
+
+    private List<Document> denseSearch(String query) {
+        return vectorStore.similaritySearch(
+                SearchRequest.builder()
+                        .query(query)
+                        .topK(topK)
+                        .similarityThreshold(similarityThreshold)
+                        .build()
+        );
+    }
+
+    /**
+     * dense + lexical 채널을 RRF로 융합한 하이브리드 검색.
+     *
+     * <p>lexical 채널 실패 시 dense 결과만 반환한다(graceful degrade). 실패 원인에 따른 영향:
+     * <ul>
+     *   <li>pg_trgm 확장 미설치: {@code %} 연산자 없음 → SQL 예외 → dense 단독 폴백</li>
+     *   <li>GIN 인덱스 없음: 순차 스캔으로 동작 — 기능 정상, 성능 저하</li>
+     * </ul>
+     * </p>
+     */
+    private List<Document> hybridSearch(String query) {
+        // 1) dense 채널
+        List<Document> denseResults = denseSearch(query);
+
+        // 2) lexical 채널 — 실패 시 dense 단독 폴백
+        List<String> lexicalRanking;
+        try {
+            lexicalRanking = lexicalSearch(query);
+        } catch (Exception e) {
+            log.warn("lexical 검색 실패 - dense 결과만 사용합니다. 원인: {}", e.getMessage());
+            return denseResults;
+        }
+
+        // 3) dense 순위 및 키→Document 매핑 구성
+        Map<String, Document> byKey = new LinkedHashMap<>();
+        List<String> denseRanking = new ArrayList<>(denseResults.size());
+        for (Document doc : denseResults) {
+            String key = doc.getId();
+            denseRanking.add(key);
+            byKey.putIfAbsent(key, doc);
+        }
+
+        // 4) RRF 융합
+        List<String> fusedKeys = RrfFusion.fuse(
+                denseRanking, lexicalRanking,
+                hybridDenseWeight, hybridLexicalWeight,
+                RrfFusion.DEFAULT_K, topK);
+
+        // lexical 단독 문서(dense에 없는 키)는 Document 본문이 없으므로 제외하고,
+        // 융합 점수로 재정렬된 dense 문서만 반환한다. lexical 신호는 순위 가중치로 반영된다.
+        List<Document> result = new ArrayList<>(fusedKeys.size());
+        for (String key : fusedKeys) {
+            Document doc = byKey.get(key);
+            if (doc != null) {
+                result.add(doc);
+            }
+        }
+
+        log.debug("하이브리드 검색 완료 - dense: {}, lexical: {}, 융합: {}",
+                denseResults.size(), lexicalRanking.size(), result.size());
+        return result;
+    }
+
+    /**
+     * pg_trgm {@code %>} (word_similarity) 연산자를 이용한 lexical 검색.
+     *
+     * <p>{@code similarity(%)} 연산자는 질문·문서 trigram 합집합으로 나눠 4000자 청크에서
+     * 유사도가 0.006~0.058로 폭락한다. {@code %>>}(word_similarity)는 문서 내에서 질문과
+     * 가장 잘 맞는 구간만 비교하므로 문서 길이에 강건하다 (측정 recall@3 = 0.80, 임계값 0.30).</p>
+     *
+     * <p>{@code pg_trgm.word_similarity_threshold} 기본값(0.6)은 너무 엄격하므로
+     * {@code set_config(is_local=true)}로 트랜잭션 범위에서만 0.30으로 조정한다.
+     * 트랜잭션 종료 시 자동 복원되어 커넥션 풀 누수가 없다.</p>
+     *
+     * <p>연산자 방향: {@code content %> ?} = {@code word_similarity(query, content) >= threshold}
+     * ORDER BY: {@code word_similarity(?, content)} — 질문이 앞, 문서가 뒤</p>
+     *
+     * @return 융합 키 역할을 하는 문서 UUID 문자열 리스트 (유사도 내림차순)
+     */
+    private List<String> lexicalSearch(String query) {
+        List<String> ids = new TransactionTemplate(transactionManager).execute(status -> {
+            // is_local=true: 이 트랜잭션 안에서만 임계값 적용, 커밋 시 자동 복원
+            jdbcTemplate.queryForObject(
+                    "SELECT set_config('pg_trgm.word_similarity_threshold', ?, true)",
+                    String.class,
+                    Double.toString(wordSimilarityThreshold));
+            String sql = "SELECT id::text FROM " + vectorStoreTable
+                    + " WHERE content %> ? ORDER BY word_similarity(?, content) DESC LIMIT ?";
+            return jdbcTemplate.queryForList(sql, String.class, query, query, topK);
+        });
+        return ids != null ? ids : List.of();
     }
 }

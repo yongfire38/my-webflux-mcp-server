@@ -93,6 +93,17 @@ app:
     similarity-threshold: 0.30
     top-k: 5
     max-content-length: 2000
+    hybrid:
+      # 활성화 여부. false(기본)이면 dense 단일 검색만 사용 (기존 동작 유지)
+      enabled: false
+      # 채널별 RRF 가중치
+      weight:
+        dense: 1.0
+        lexical: 1.0
+      lexical:
+        # pg_trgm.word_similarity_threshold (기본값 0.6은 너무 엄격 — 4000자 청크 기준 0.30 권장)
+        # 0.30 → recall@3: 0.80 / 0.40 → 0.57 / 0.60(기본) → 0.31
+        word-similarity-threshold: 0.30
 
 # Springdoc (Swagger)
 springdoc:
