@@ -90,6 +90,15 @@ public class DocumentSearchServiceImpl extends EgovAbstractServiceImpl implement
             }
 
             log.info("검색 결과 {}건 - 질의: {}", results.size(), query);
+            if (log.isDebugEnabled()) {
+                for (int i = 0; i < results.size(); i++) {
+                    Document d = results.get(i);
+                    log.debug("  [{}] 출처: {} (유사도: {})",
+                            i + 1,
+                            d.getMetadata().getOrDefault("source", "unknown"),
+                            d.getScore() != null ? String.format("%.3f", d.getScore()) : "-");
+                }
+            }
 
             StringBuilder sb = new StringBuilder();
             sb.append(String.format("검색 결과 %d건 (모드: %s)\n\n",
