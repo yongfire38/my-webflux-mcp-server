@@ -102,6 +102,10 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
                 log.info("총 {}개의 문서를 로드했습니다. (마크다운: {}개, PDF: {}개)",
                         allDocuments.size(), markdownDocuments.size(), pdfDocuments.size());
 
+                // 이슈 #23: 디스크에서 삭제·이름 변경된 파일의 고아(orphan) 벡터·메타데이터 정리
+                // 현재 디스크에 존재하는 파일명 집합과 DB에 기록된 파일명 집합의 차집합을 구해 삭제
+                cleanupOrphanDocuments(allDocuments);
+
                 // 2단계: 변경된 문서 필터링
                 List<Document> changedDocuments = filterChangedDocuments(allDocuments);
                 changedCount.set(changedDocuments.size());
@@ -328,14 +332,57 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
                 metadata.setContentHash(newHash);
                 metadata.setIndexedAt(LocalDateTime.now());
             } else {
-                // REST 경로(서버 파일시스템 인덱싱)는 클라이언트 출처가 없음 — sourceClient null
-                metadata = new DocumentMetadata(null, filename, chunkIndex, newHash, LocalDateTime.now(), null);
+                // REST 경로(서버 파일시스템 인덱싱)는 클라이언트 출처 및 요약 없음 — null
+                metadata = new DocumentMetadata(null, filename, chunkIndex, newHash, LocalDateTime.now(), null, null);
             }
 
             metadataRepository.save(metadata);
             log.debug("문서 '{}' [{}] 해시 저장 완료: {}", filename, chunkIndex, newHash);
         } catch (Exception e) {
             log.error("문서 '{}' [{}] 해시 저장 실패", filename, chunkIndex, e);
+        }
+    }
+
+    /**
+     * 이슈 #23: 디스크에서 삭제·이름 변경된 파일의 고아 벡터·메타데이터를 일괄 정리합니다.
+     *
+     * 디스크에 없는데 DB에는 기록이 남아 있는 파일(orphan)을 찾아
+     * document_metadata와 vector_store에서 해당 파일 레코드를 모두 삭제합니다.
+     * REST 경로(reindex)에서만 호출되며, MCP 경로는 명시적 파일명 처리이므로 해당 없음.
+     */
+    private void cleanupOrphanDocuments(List<Document> diskDocuments) {
+        try {
+            // 현재 디스크에 존재하는 파일명 집합
+            java.util.Set<String> diskFilenames = diskDocuments.stream()
+                    .map(d -> (String) d.getMetadata().get("source"))
+                    .filter(s -> s != null)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            // DB에 기록된 파일명 집합
+            List<String> dbFilenames = metadataRepository.findAllDistinctFilenames();
+
+            // DB에는 있지만 디스크에는 없는 고아 파일명
+            List<String> orphans = dbFilenames.stream()
+                    .filter(f -> !diskFilenames.contains(f))
+                    .toList();
+
+            if (orphans.isEmpty()) {
+                log.debug("[고아 정리] 고아 문서 없음");
+                return;
+            }
+
+            log.info("[고아 정리] {}개 파일 고아 감지 — 벡터·메타데이터 삭제: {}", orphans.size(), orphans);
+            for (String filename : orphans) {
+                try {
+                    staleVectorCleaner.deleteBySource(filename);
+                    metadataRepository.deleteByFilename(filename);
+                    log.info("[고아 정리] {} 삭제 완료", filename);
+                } catch (Exception e) {
+                    log.error("[고아 정리] {} 삭제 실패: {}", filename, e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.error("[고아 정리] 고아 정리 중 오류 발생 — 이 오류는 무시하고 인덱싱을 계속합니다: {}", e.getMessage());
         }
     }
 

@@ -30,4 +30,8 @@ public class DocumentMetadata {
 
     /** 업로드 출처 클라이언트 식별자 (MCP clientInfo.name). REST 경로로 인덱싱된 문서는 null. */
     private String sourceClient;
+
+    /** 문서 전체 요약 (MCP Sampling으로 생성). 동일 파일의 모든 청크에 동일 값 저장. REST 경로는 null. */
+    @Column(length = 2000)
+    private String summary;
 }
