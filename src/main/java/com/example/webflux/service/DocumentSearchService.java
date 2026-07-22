@@ -5,6 +5,4 @@ import reactor.core.publisher.Mono;
 public interface DocumentSearchService {
 
     Mono<String> searchDocuments(String query);
-
-    Mono<String> describeKnowledgeBase();
 }

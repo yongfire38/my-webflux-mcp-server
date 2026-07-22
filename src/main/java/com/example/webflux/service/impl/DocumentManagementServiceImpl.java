@@ -328,7 +328,7 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
                 metadata.setContentHash(newHash);
                 metadata.setIndexedAt(LocalDateTime.now());
             } else {
-                // REST 경로(서버 파일시스템 인덱싱)는 클라이언트 출처가 없음 — sourceClient null
+                // REST 경로(서버 파일시스템 인덱싱)는 소유자 없음 — ownerUserId null
                 metadata = new DocumentMetadata(null, filename, chunkIndex, newHash, LocalDateTime.now(), null);
             }
 

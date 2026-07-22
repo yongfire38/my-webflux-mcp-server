@@ -12,9 +12,9 @@ spring:
     # 배너가 서버 연동시 오류를 일으킬 수 있으므로 반드시 off
     banner-mode: off
 
-  # PostgreSQL
+  # PostgreSQL (전용 컨테이너 mcpdb:5434 — ragdb:5432 공유 컨테이너와 분리)
   datasource:
-    url: jdbc:postgresql://localhost:5432/ragdb
+    url: jdbc:postgresql://localhost:5434/mcpdb
     username: postgres
     password: postgres
     driver-class-name: org.postgresql.Driver
@@ -22,7 +22,7 @@ spring:
   # JPA
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
 
   # Spring AI
   ai:
@@ -49,6 +49,21 @@ spring:
             maxLength: 512
             returnTensor: true
 
+    # Ollama (LLM — 서버에서 직접 호출)
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${OLLAMA_MODEL:HyperCLOVA-3b:Q4_K_MM}
+          temperature: 0.7
+
+    # JDBC 채팅 메모리 (spring_ai_chat_memory 테이블 자동 생성)
+    chat:
+      memory:
+        repository:
+          jdbc:
+            initialize-schema: always
+
     # PGVector
     vectorstore:
       pgvector:
@@ -69,8 +84,12 @@ logging:
     com.example.webflux: DEBUG
     org.springframework.ai: INFO
 
-# Document (custom namespace)
+# Application
 app:
+  auth:
+    jwt:
+      secret: ${JWT_SECRET:dev-secret-key-for-local-use-only-change-in-prod}
+      expiration-ms: 86400000   # 24시간
   document:
     path: file:C:/workspace-test/upload/data/**/*.md
     pdf-path: file:C:/workspace-test/upload/data/**/*.pdf

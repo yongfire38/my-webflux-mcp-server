@@ -1,10 +1,17 @@
 package com.example.webflux.model;
 
-import jakarta.persistence.*;
+import java.time.LocalDateTime;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "document_metadata", uniqueConstraints = @UniqueConstraint(columnNames = {"filename", "chunkIndex"}))
@@ -28,6 +35,7 @@ public class DocumentMetadata {
     @Column(nullable = false)
     private LocalDateTime indexedAt;
 
-    /** 업로드 출처 클라이언트 식별자 (MCP clientInfo.name). REST 경로로 인덱싱된 문서는 null. */
-    private String sourceClient;
+    /** 업로드 소유자 식별자 (MCP clientInfo.name 또는 JWT userId). REST 경로로 인덱싱된 문서는 null. */
+    @Column(name = "owner_user_id")
+    private String ownerUserId;
 }

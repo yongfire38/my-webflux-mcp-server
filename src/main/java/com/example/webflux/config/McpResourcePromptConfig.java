@@ -1,41 +1,32 @@
 package com.example.webflux.config;
 
+import java.util.Map;
+import java.util.stream.Collectors;
+
 import org.springaicommunity.mcp.annotation.McpArg;
 import org.springaicommunity.mcp.annotation.McpPrompt;
 import org.springaicommunity.mcp.annotation.McpResource;
 import org.springframework.stereotype.Component;
 
-import com.example.webflux.service.DocumentSearchService;
+import com.example.webflux.model.DocumentMetadata;
+import com.example.webflux.repository.DocumentMetadataRepository;
 
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 /**
  * MCP Resource / Prompt 등록 컴포넌트
- *
- * @McpResource: 읽기 전용 데이터 소스 노출 (resource://documents/index)
- *   → LLM이 어떤 파일이 검색 가능한지 사전 파악
- *   → searchDocuments 호출 전 사전 확인 용도
- *
- * @McpPrompt: 재사용 가능한 프롬프트 템플릿 (rag_assistant)
- *   → 클라이언트가 system 메시지로 사용하면 LLM이 searchDocuments를 우선 호출
- *   → strict 파라미터로 엄격도 조정 가능
  */
 @Component
 @RequiredArgsConstructor
 public class McpResourcePromptConfig {
 
-    private final DocumentSearchService documentSearchService;
+    private final DocumentMetadataRepository documentMetadataRepository;
 
     /**
-     * [Resource 예시] 인덱싱된 문서 목록
-     *
-     * MCP Resource는 LLM이 읽기 전용으로 접근하는 데이터 소스입니다.
-     * 도구(Tool)와의 차이: 도구는 실행/검색, 리소스는 정적 데이터 노출
-     *
-     * - URI: resource://documents/index
-     * - 반환: 인덱싱된 파일 목록 텍스트
-     * - describeKnowledgeBase MCP Tool과 동일 로직이므로 DocumentSearchService에 위임
+     * MCP Resource: 인덱싱된 문서 목록
+     * URI: resource://documents/index
      */
     @McpResource(
             uri = "resource://documents/index",
@@ -45,17 +36,29 @@ public class McpResourcePromptConfig {
             mimeType = "text/plain"
     )
     public Mono<String> getDocumentIndex() {
-        return documentSearchService.describeKnowledgeBase();
+        return Mono.fromCallable(() -> {
+            long totalChunks = documentMetadataRepository.count();
+            if (totalChunks == 0) {
+                return "인덱싱된 문서가 없습니다. 먼저 문서를 업로드하고 인덱싱하세요.";
+            }
+            Map<String, Long> fileChunks = documentMetadataRepository.findAll().stream()
+                    .collect(Collectors.groupingBy(DocumentMetadata::getFilename, Collectors.counting()));
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== RAG 지식 베이스 현황 ===\n");
+            sb.append(String.format("총 파일 수: %d개 | 총 청크 수: %d개\n\n", fileChunks.size(), totalChunks));
+            sb.append("파일 목록 (파일명 - 청크 수):\n");
+            fileChunks.forEach((filename, count) ->
+                    sb.append(String.format("  - %s (%d 청크)\n", filename, count)));
+            sb.append("\nsearchDocuments 도구로 이 파일들의 내용을 검색할 수 있습니다.");
+            return sb.toString();
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     /**
-     * [Prompt 예시] RAG 어시스턴트 시스템 프롬프트
-     *
-     * MCP Prompt는 재사용 가능한 프롬프트 템플릿입니다.
-     * 도구(Tool)와의 차이: 도구는 기능 실행, 프롬프트는 LLM 행동 지침 제공
-     *
+     * MCP Prompt: RAG 어시스턴트 시스템 프롬프트 템플릿
      * - strict=false (기본): 기술 질문에만 searchDocuments 강제
-     * - strict=true        : 모든 질문에 검색 강제, 검색 결과 없으면 답변 거부
+     * - strict=true:         모든 질문에 검색 강제
      */
     @McpPrompt(
             name = "rag_assistant",
@@ -73,10 +76,6 @@ public class McpResourcePromptConfig {
         return "true".equalsIgnoreCase(strict) ? STRICT_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // 시스템 프롬프트 템플릿
-    // ─────────────────────────────────────────────────────────────────────────
-
     private static final String DEFAULT_SYSTEM_PROMPT = """
             당신은 문서 기반 AI 어시스턴트입니다.
 
@@ -85,7 +84,6 @@ public class McpResourcePromptConfig {
                반드시 searchDocuments 도구를 먼저 호출하고 그 결과를 근거로 답변하세요.
             2. 학습된 지식만으로 답변하지 마세요. 문서 검색 후 답변하세요.
             3. 검색 결과가 없으면 "문서에서 찾을 수 없습니다"라고 안내하세요.
-            4. describeKnowledgeBase 도구로 어떤 문서가 있는지 먼저 확인할 수 있습니다.
             """;
 
     private static final String STRICT_SYSTEM_PROMPT = """

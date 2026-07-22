@@ -1,19 +1,20 @@
 services:
   postgres:
     image: pgvector/pgvector:pg16  # PostgreSQL 16 + PGVector
-    container_name: rag-pgvector
+    container_name: mcp-server-db
     environment:
-      POSTGRES_DB: ragdb
+      POSTGRES_DB: mcpdb
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mcpdata:/var/lib/postgresql/data
       # 컨테이너 최초 생성 시 실행되는 초기화 스크립트.
-      # vector 확장(pgvector 이미지 기본 제공) 및 pg_trgm 확장(하이브리드 lexical 검색용)을 설치한다.
+      # 01: vector, pg_trgm 확장 설치
+      # 02: users, spring_ai_chat_sessions 테이블 생성
       # 주의: 이미 실행 중인 컨테이너에는 적용되지 않는다 — 필요 시 컨테이너를 삭제 후 재생성.
       - ./init-scripts:/docker-entrypoint-initdb.d
 
 volumes:
-  pgdata:
+  mcpdata:
