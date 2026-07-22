@@ -89,6 +89,13 @@ app:
       normalize-newlines: true
       remove-code-blocks: false
       clean-special-chars: true
+  security:
+    # 신뢰 클라이언트 API 키 목록.
+    # MCP Tool uploadAndIndexDocument 및 POST /api/documents/upload 호출에 필요.
+    # 환경변수 MCP_API_KEY 미설정 시 빈 문자열 → 모든 업로드 차단 (의도된 안전 기본값).
+    api-keys:
+      - "${MCP_API_KEY:}"
+
   rag:
     similarity-threshold: 0.30
     top-k: 5

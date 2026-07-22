@@ -20,6 +20,8 @@ import org.springframework.ai.vectorstore.pgvector.PgVectorStore;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.stereotype.Service;
 
+import com.example.webflux.config.McpTransportConfig;
+import com.example.webflux.config.SecurityProperties;
 import com.example.webflux.etl.transformers.ContentFormatTransformer;
 import com.example.webflux.etl.transformers.DocumentChunkTransformer;
 import com.example.webflux.model.DocumentMetadata;
@@ -56,6 +58,7 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
     private final PgVectorStore pgVectorStore;
     private final DocumentMetadataRepository metadataRepository;
     private final StaleVectorCleaner staleVectorCleaner;
+    private final SecurityProperties securityProperties;
 
     private static final int PROGRESS_TOTAL_STEPS = 4;
 
@@ -91,6 +94,13 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
             @McpToolParam(description = "파일 내용을 Base64 인코딩한 문자열") String base64Content,
             @McpToolParam(description = "MIME 타입: application/pdf 또는 text/markdown") String mimeType
     ) {
+        // 이슈 #26: transportContext에서 X-MCP-API-Key 헤더 값을 꺼내 신뢰 클라이언트 검증
+        String apiKey = (String) ctx.transportContext().get(McpTransportConfig.TRANSPORT_CTX_API_KEY);
+        if (!securityProperties.isValidKey(apiKey)) {
+            log.warn("[업로드][{}] MCP API 키 인증 실패 — 업로드 거부", jobId);
+            return Mono.just(String.format("[%s] 인증 실패 — 업로드가 거부되었습니다. 유효한 X-MCP-API-Key가 필요합니다.", jobId));
+        }
+
         String clientId = ctx.clientInfo() != null ? ctx.clientInfo().name() : "unknown";
         log.info("[업로드] 요청 수신 — jobId: {}, filename: {}, mimeType: {}, clientId: {}",
                 jobId, filename, mimeType, clientId);
