@@ -96,6 +96,8 @@ public class DocumentClientUploadServiceImpl extends EgovAbstractServiceImpl {
     ) {
         // 이슈 #26: transportContext에서 X-MCP-API-Key 헤더 값을 꺼내 신뢰 클라이언트 검증
         String apiKey = (String) ctx.transportContext().get(McpTransportConfig.TRANSPORT_CTX_API_KEY);
+        log.debug("[업로드][{}] 수신 API 키: '{}'", jobId, apiKey);
+        log.debug("[업로드][{}] 유효 키 목록: {}", jobId, securityProperties.getApiKeys());
         if (!securityProperties.isValidKey(apiKey)) {
             log.warn("[업로드][{}] MCP API 키 인증 실패 — 업로드 거부", jobId);
             return Mono.just(String.format("[%s] 인증 실패 — 업로드가 거부되었습니다. 유효한 X-MCP-API-Key가 필요합니다.", jobId));
