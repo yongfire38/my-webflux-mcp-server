@@ -31,6 +31,16 @@ spring:
       server:
         type: ASYNC
         protocol: STREAMABLE
+        # MCP initialize 응답에 포함되는 서버 사용 안내.
+        # VS Code·Claude Desktop·MCP Inspector 등 외부 클라이언트가 연결 즉시 수신.
+        instructions: |
+          이 서버는 RAG 지식 베이스 검색과 문서 업로드를 제공합니다.
+          - searchDocuments: 벡터 유사도 검색 (질문 전 반드시 호출)
+          - describeKnowledgeBase: 인덱싱 현황 확인
+          - uploadAndIndexDocument: PDF/MD 업로드 (X-MCP-API-Key 헤더 필수)
+        streamable-http:
+          # 방화벽·프록시의 idle connection 강제 종료 방지용 주기적 ping
+          keep-alive-interval: 30s
 
     # ONNX Embedding Model
     model:
@@ -102,7 +112,7 @@ app:
     max-content-length: 2000
     hybrid:
       # 활성화 여부. false(기본)이면 dense 단일 검색만 사용 (기존 동작 유지)
-      enabled: false
+      enabled: true
       # 채널별 RRF 가중치
       weight:
         dense: 1.0
