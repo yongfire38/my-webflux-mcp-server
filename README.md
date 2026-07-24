@@ -48,7 +48,7 @@ PostgreSQL(ragdb:5432)과 pg_trgm 익스텐션이 자동으로 준비됩니다.
 
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
-| `MCP_API_KEY` | MCP 업로드 도구 및 REST 업로드 인증 키 | 빈 문자열 (업로드 전체 차단) |
+| `MCP_API_KEY` | MCP `uploadAndIndexDocument` 도구 인증 키 | 빈 문자열 (MCP 업로드 전체 차단) |
 | `EMBEDDING_MODEL_PATH` | ONNX 모델 파일 전체 경로 | `${user.home}/spring-ai-Config/model/model.onnx` |
 | `EMBEDDING_TOKENIZER_PATH` | 토크나이저 파일 전체 경로 | `${user.home}/spring-ai-Config/model/tokenizer.json` |
 
@@ -119,9 +119,10 @@ MCP 경로(`/mcp/**`)와 별개로 서버 파일시스템 문서를 관리하는
 |--------|------|------|------|
 | `GET` | `/api/documents/status` | localhost 전용 | ETL 진행 상태 조회 |
 | `POST` | `/api/documents/reindex` | localhost 전용 | 서버 로컬 문서 전체 재인덱싱 (202/409) |
-| `POST` | `/api/documents/upload` | `X-API-Key` 헤더 | 멀티파트 파일 업로드 및 임베딩 (`.md` 전용, `files` 파트명) |
 
 > localhost 전용 경로는 외부 IP에서 호출 시 `ApiSecurityFilter`가 403을 반환합니다.
+>
+> 문서 파일 추가는 서버의 `app.document.path` 경로에 직접 복사 후 `/api/documents/reindex` 호출로 적재하거나, MCP `uploadAndIndexDocument` 도구(base64 전송)를 사용합니다.
 
 ---
 
@@ -140,7 +141,6 @@ MCP 경로(`/mcp/**`)와 별개로 서버 파일시스템 문서를 관리하는
 | 계층 | 구현 | 대상 |
 |------|------|------|
 | REST IP 제한 | `ApiSecurityFilter` (WebFilter) | `/api/documents/reindex`, `/api/documents/status` — localhost만 허용 |
-| REST API 키 | `ApiSecurityFilter` (WebFilter) | `POST /api/documents/upload` — `X-API-Key` 헤더 검증 |
 | MCP 업로드 키 | `McpTransportConfig` + Tool 내부 검증 | `uploadAndIndexDocument` — `X-MCP-API-Key` 헤더 추출 후 Tool 내부에서 검증 |
 
 MCP 읽기 도구(`searchDocuments`, `describeKnowledgeBase`, `getCurrentDateTimeWithZone`)는 인증 없이 개방됩니다.
@@ -184,7 +184,7 @@ src/main/java/com/example/webflux/
 │   └── impl/
 │       ├── DateTimeServiceImpl.java               # @McpTool: getCurrentDateTimeWithZone
 │       ├── DocumentClientUploadServiceImpl.java   # @McpTool: uploadAndIndexDocument
-│       ├── DocumentManagementServiceImpl.java     # REST reindex·upload 처리
+│       ├── DocumentManagementServiceImpl.java     # REST reindex 처리 (ETL 파이프라인)
 │       └── DocumentSearchServiceImpl.java         # @McpTool: searchDocuments, describeKnowledgeBase
 └── util/
     ├── DocumentHashUtil.java              # SHA-256 해시 계산
@@ -243,7 +243,7 @@ springdoc:
 |------|------|------|
 | `model.onnx not found` | ONNX 모델 파일 누락 | `%USERPROFILE%\spring-ai-Config\model\`에 모델 파일 복사 |
 | PGVector 연결 오류 | PostgreSQL 미기동 | `docker-compose up -d` 실행 |
-| 업로드 인증 실패 | `MCP_API_KEY` 미설정 또는 불일치 | 환경변수 설정 후 서버·클라이언트 재기동 |
+| MCP 업로드 인증 실패 | `MCP_API_KEY` 미설정 또는 클라이언트 키 불일치 | 서버·클라이언트 양쪽 `MCP_API_KEY` 환경변수 일치 여부 확인 후 재기동 |
 | 인덱싱 중 409 Conflict | 재인덱싱 이미 진행 중 | `/api/documents/status` 확인 후 완료 대기 |
 | Sampling 요약 미생성 | 클라이언트 Ollama 미기동 또는 Sampling 미지원 | Ollama 기동 확인. Sampling 불가 시 자체 Ollama로 대체 생성. |
 | 하이브리드 검색 결과 수 < topK | RRF 결과 중 lexical 전용 문서는 본문 없어 제외 | 정상 동작. topK 증가 또는 dense 가중치 조정으로 완화 가능. |
