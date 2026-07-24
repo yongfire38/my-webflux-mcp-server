@@ -7,9 +7,6 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 
-import com.example.webflux.config.SecurityProperties;
-
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 
@@ -20,24 +17,15 @@ import reactor.core.publisher.Mono;
  *   POST /api/documents/reindex, GET /api/documents/status
  *   → RemoteAddr이 127.0.0.1 또는 ::1이 아니면 403
  *
- * 규칙 B — API 키 보호 경로 (신뢰 클라이언트만):
- *   POST /api/documents/upload
- *   → X-API-Key 헤더가 설정 키 목록에 없으면 401
- *
  * 그 외 경로(/mcp, Swagger 등)는 관여하지 않고 다음 필터로 통과.
  */
 @Slf4j
 @Component
 @Order(-100)
-@RequiredArgsConstructor
 public class ApiSecurityFilter implements WebFilter {
 
-    private static final String REINDEX_PATH  = "/api/documents/reindex";
-    private static final String STATUS_PATH   = "/api/documents/status";
-    private static final String UPLOAD_PATH   = "/api/documents/upload";
-    private static final String API_KEY_HEADER = "X-API-Key";
-
-    private final SecurityProperties securityProperties;
+    private static final String REINDEX_PATH = "/api/documents/reindex";
+    private static final String STATUS_PATH  = "/api/documents/status";
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
@@ -55,26 +43,12 @@ public class ApiSecurityFilter implements WebFilter {
             }
         }
 
-        // 규칙 B: API 키 보호
-        if (isApiKeyProtected(path, method)) {
-            String key = exchange.getRequest().getHeaders().getFirst(API_KEY_HEADER);
-            if (!securityProperties.isValidKey(key)) {
-                log.warn("[보안] 유효하지 않은 API 키로 업로드 시도 차단 — path: {}", path);
-                exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-                return exchange.getResponse().setComplete();
-            }
-        }
-
         return chain.filter(exchange);
     }
 
     private boolean isLocalhostOnly(String path, String method) {
         return (REINDEX_PATH.equals(path) && "POST".equals(method))
                 || (STATUS_PATH.equals(path) && "GET".equals(method));
-    }
-
-    private boolean isApiKeyProtected(String path, String method) {
-        return UPLOAD_PATH.equals(path) && "POST".equals(method);
     }
 
     private String resolveRemoteAddr(ServerWebExchange exchange) {

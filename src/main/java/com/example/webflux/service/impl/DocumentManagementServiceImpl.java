@@ -1,14 +1,8 @@
 package com.example.webflux.service.impl;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -16,8 +10,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.egovframe.rte.fdl.cmmn.EgovAbstractServiceImpl;
 import org.springframework.ai.document.Document;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.stereotype.Service;
 
 import com.example.webflux.dto.DocumentStatusResponse;
@@ -34,19 +26,11 @@ import com.example.webflux.util.StaleVectorCleaner;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl implements DocumentManagementService {
-
-    private static final long MAX_UPLOAD_SIZE_BYTES = 50L * 1024 * 1024; // 50MB
-    private static final int  MAX_UPLOAD_FILE_COUNT = 5;
-
-    @Value("${app.document.upload-dir:C:/workspace-test/upload/data}")
-    private String uploadDir;
 
     private final MarkdownDocumentReader markdownReader;
     private final PdfDocumentReader pdfReader;
@@ -180,82 +164,6 @@ public class DocumentManagementServiceImpl extends EgovAbstractServiceImpl imple
               });
 
         return "문서 재인덱싱이 처리되었습니다.";
-    }
-
-    @Override
-    public Mono<Map<String, Object>> uploadMarkdownFiles(Flux<FilePart> files) {
-        return files.collectList().flatMap(fileList -> {
-            Map<String, Object> result = new HashMap<>();
-
-            if (fileList.isEmpty()) {
-                result.put("success", false);
-                result.put("message", "업로드할 파일이 없습니다.");
-                result.put("files", Collections.emptyList());
-                return Mono.just(result);
-            }
-
-            if (fileList.size() > MAX_UPLOAD_FILE_COUNT) {
-                result.put("success", false);
-                result.put("message", "최대 " + MAX_UPLOAD_FILE_COUNT + "개 파일만 업로드할 수 있습니다.");
-                result.put("files", Collections.emptyList());
-                return Mono.just(result);
-            }
-
-            File dir = new File(uploadDir);
-            if (!dir.exists()) {
-                dir.mkdirs();
-            }
-
-            return Flux.fromIterable(fileList)
-                .flatMap(filePart -> {
-                    String rawFilename = filePart.filename();
-                    if (rawFilename == null || rawFilename.isBlank()) {
-                        return Mono.error(new IllegalArgumentException("파일명이 없습니다."));
-                    }
-                    // 방어 1단계: 순수 파일명만 추출 (경로 탐색 문자 제거)
-                    String filename = Paths.get(rawFilename).getFileName().toString();
-
-                    if (!filename.endsWith(".md")) {
-                        return Mono.error(new IllegalArgumentException("마크다운(.md) 파일만 업로드 가능합니다."));
-                    }
-
-                    // 파일 크기 선검사 (Content-Length 헤더 기반, best-effort)
-                    String contentLengthHeader = filePart.headers()
-                            .getFirst(org.springframework.http.HttpHeaders.CONTENT_LENGTH);
-                    if (contentLengthHeader != null) {
-                        try {
-                            long size = Long.parseLong(contentLengthHeader);
-                            if (size > MAX_UPLOAD_SIZE_BYTES) {
-                                return Mono.error(new IllegalArgumentException(
-                                        filename + " 파일 크기가 50MB를 초과합니다."));
-                            }
-                        } catch (NumberFormatException ignored) { }
-                    }
-
-                    File dest = new File(dir, filename);
-                    try {
-                        // 방어 2단계: 경로 탐색(Path Traversal) 방어
-                        if (!dest.getCanonicalPath().startsWith(dir.getCanonicalPath() + File.separator)) {
-                            return Mono.error(new IllegalArgumentException("허용되지 않는 파일 경로입니다: " + filename));
-                        }
-                    } catch (IOException e) {
-                        return Mono.error(new IllegalArgumentException("파일 경로 검증 실패: " + e.getMessage()));
-                    }
-                    return filePart.transferTo(dest).thenReturn(filename);
-                })
-                .collectList()
-                .map(uploadedFiles -> {
-                    result.put("success", true);
-                    result.put("uploaded", uploadedFiles.size());
-                    result.put("files", uploadedFiles);
-                    return result;
-                })
-                .onErrorResume(e -> {
-                    result.put("success", false);
-                    result.put("message", e.getMessage());
-                    return Mono.just(result);
-                });
-        });
     }
 
     /**
